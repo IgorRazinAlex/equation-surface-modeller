@@ -1,131 +1,168 @@
 import numpy as np
 import mcubes
-import pyvista as pv
+from abc import ABC, abstractmethod
+from typing import Tuple
 
 from src.view.plot import SpaceMetadata
+from src.calc.equations import ExplicitSurfaceEquation, sanitize_equation
 
 
-class SurfaceMesh:
+class SurfaceMesh(ABC):
     def __init__(self, equation: str, space_metadata: SpaceMetadata):
-        self.equation = equation
+        self.equation = sanitize_equation(equation)
         self.space_metadata = space_metadata
-
-    def generate_mesh(self):
+    
+    @abstractmethod
+    def generate_mesh(self) -> Tuple[np.ndarray, np.ndarray]:
         pass
+
+    def get_equation(self) -> str:
+        return self.equation
+
+    def get_space_metadata(self) -> SpaceMetadata:
+        return self.space_metadata
 
 
 class ExplicitSurfaceMesh(SurfaceMesh):
-    '''
-    решаем уравнение для кажого (x, y) из дискретной сетки, строим мэш
-    '''
     def __init__(self, equation: str, space_metadata: SpaceMetadata):
-        pass
+        super().__init__(equation, space_metadata)
+        self.equation_solver = ExplicitSurfaceEquation(equation)
+    
+    def _create_triangles(self, nx: int, ny: int) -> np.ndarray:
+        triangles = []
+        
+        for i in range(nx - 1):
+            for j in range(ny - 1):
+                p0 = i * ny + j
+                p1 = i * ny + (j + 1)
+                p2 = (i + 1) * ny + j
+                p3 = (i + 1) * ny + (j + 1)
+
+                triangles.append([p0, p1, p2])
+                triangles.append([p1, p3, p2])
+        
+        return np.array(triangles, dtype=np.int32)
+    
+    def _filter_valid_points(self, 
+                            vertices: np.ndarray, 
+                            triangles: np.ndarray,
+                            valid_mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        nx, ny = valid_mask.shape
+        old_to_new = np.full(nx * ny, -1, dtype=np.int32)
+
+        valid_vertices = []
+        new_index = 0
+        
+        for i in range(nx):
+            for j in range(ny):
+                idx = i * ny + j
+                if valid_mask[i, j]:
+                    old_to_new[idx] = new_index
+                    valid_vertices.append(vertices[idx])
+                    new_index += 1
+        
+        if len(valid_vertices) == 0:
+            return np.array([]), np.array([])
+        
+        valid_vertices = np.array(valid_vertices)
+        valid_triangles = []
+        for tri in triangles:
+            new_tri = [old_to_new[idx] for idx in tri]
+            if all(idx != -1 for idx in new_tri):
+                valid_triangles.append(new_tri)
+        
+        return valid_vertices, np.array(valid_triangles, dtype=np.int32)
+    
+    def generate_mesh(self) -> Tuple[np.ndarray, np.ndarray]:
+        plot_metadata = self.equation_solver.solve(self.space_metadata)
+
+        if np.all(np.isnan(plot_metadata.z)):
+            raise ValueError("No valid points generated for the surface")
+
+        nx, ny = plot_metadata.z.shape
+        x_axis, y_axis = self.space_metadata.get_axes()
+
+        valid_mask = ~np.isnan(plot_metadata.z)
+        
+        if not np.any(valid_mask):
+            raise ValueError("No valid points to generate mesh")
+
+        vertices = np.zeros((nx * ny, 3), dtype=float)
+        
+        for i in range(nx):
+            for j in range(ny):
+                idx = i * ny + j
+                vertices[idx] = [
+                    x_axis[i],
+                    y_axis[j],
+                    plot_metadata.z[i, j]
+                ]
+
+        all_triangles = self._create_triangles(nx, ny)
+        vertices, triangles = self._filter_valid_points(vertices, all_triangles, valid_mask)
+        
+        if len(vertices) == 0 or len(triangles) == 0:
+            raise ValueError("Could not generate mesh: no valid triangles after filtering")
+        
+        return vertices, triangles
 
 
 class ImplicitSurfaceMesh(SurfaceMesh):
-    '''
-    не решаем уравнения для F(x, y, z) = 0 напрямую, а используем метод marching cubes
-    '''
-    def __init__(self, equation: str, space_metadata: SpaceMetadata, bounds=((-1, 1), (-1, 1), (-1, 1)), resolution=100):
-        super().__init__(self._sanitize_equation(equation), space_metadata)
-        self.bounds = bounds
-        self.resolution = resolution
+    def _evaluate_volume(self) -> np.ndarray:
+        X, Y, Z = self.space_metadata.get_grid_3d()
 
-    @staticmethod
-    def _sanitize_equation(eq):
-        return eq.replace('^', '**')
-
-    def _evaluate_volume(self):
-        x_min, x_max, y_min, y_max, z_min, z_max = self.space_metadata.get_bounds()
-
-        x = np.linspace(x_min, x_max, self.resolution)
-        y = np.linspace(y_min, y_max, self.resolution)
-        z = np.linspace(z_min, z_max, self.resolution)
-        
-        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
-
-        # Inject standard math functions
         env = {k: v for k, v in np.__dict__.items() if callable(v) or isinstance(v, (int, float, np.number))}
-        env.update({'x': X, 'y': Y, 'z': Z})
+        env.update(
+            {
+                'x': X,
+                'y': Y,
+                'z': Z,
+            }
+        )
+
+        try:
+            volume = eval(self.equation, {"__builtins__": {}}, env)
+
+            if volume.shape != X.shape:
+                raise ValueError(f"Function returned array of shape {volume.shape}, expected {X.shape}")
+
+            if not np.all(np.isfinite(volume)):
+                volume = np.nan_to_num(volume, nan=1e6, posinf=1e6, neginf=-1e6)
+            
+            return volume
+            
+        except Exception as e:
+            raise ValueError(f"Could not evaluate function '{self.equation}': {e}")
+    
+    def generate_mesh(self) -> Tuple[np.ndarray, np.ndarray]:
+        grid_info = self.space_metadata.get_grid_3d_with_info()
+
+        volume = self._evaluate_volume()
         
         try:
-            vol = eval(self.equation, {"__builtins__": None}, env)
-        except Exception as e:
-            raise ValueError(f"Could not evaluate function: {e}")
-            
-        return vol
+            vertices_idx, triangles = mcubes.marching_cubes(volume, 0.0)
+        except Exception as err:
+            raise RuntimeError(f"Could not generate mesh: marching_vubes algorithm error: {err}")
+        
+        if len(vertices_idx) == 0:
+            raise ValueError("Could not generate mesh: no surface found")
 
-    def generate_mesh(self):
-        """ Returns vertices and triangles (N, 3) """
-        volume = self._evaluate_volume()
-        verts, triangles = mcubes.marching_cubes(volume, 0.0)
-
-        # Rescaling to real world coordinates
-        x_min, x_max = self.bounds[0]
-        y_min, y_max = self.bounds[1]
-        z_min, z_max = self.bounds[2]
+        vertices = np.zeros_like(vertices_idx, dtype=float)
+        vertices[:, 0] = grid_info['x_min'] + (vertices_idx[:, 0] / (grid_info['x_res'] - 1)) * (grid_info['x_max'] - grid_info['x_min'])
+        vertices[:, 1] = grid_info['y_min'] + (vertices_idx[:, 1] / (grid_info['y_res'] - 1)) * (grid_info['y_max'] - grid_info['y_min'])
+        vertices[:, 2] = grid_info['z_min'] + (vertices_idx[:, 2] / (grid_info['z_res'] - 1)) * (grid_info['z_max'] - grid_info['z_min'])
         
-        verts[:, 0] = x_min + (verts[:, 0] / (self.resolution - 1)) * (x_max - x_min)
-        verts[:, 1] = y_min + (verts[:, 1] / (self.resolution - 1)) * (y_max - y_min)
-        verts[:, 2] = z_min + (verts[:, 2] / (self.resolution - 1)) * (z_max - z_min)
-        
-        return verts, triangles
-
-    def visualize(self):
-        """ Generates and visualizes the mesh using PyVista """
-        print(f"Generating mesh for: {self.equation} ...")
-        verts, triangles = self.generate_mesh()
-        
-        if len(verts) == 0:
-            print("No surface found at this level!")
-            return
-
-        # --- PyVista Data Preparation ---
-        # VTK/PyVista expects faces array to be flat: [n_points, p1, p2, p3, n_points, p4...]
-        # Since we have triangles, we must prepend '3' to every face.
-        
-        # 1. Create a column of 3s
-        padding = np.full((triangles.shape[0], 1), 3, dtype=int)
-        
-        # 2. Stack [3] + [v1, v2, v3] -> [[3, v1, v2, v3], ...]
-        faces_padded = np.hstack((padding, triangles))
-        
-        # 3. Flatten to 1D array
-        faces_flat = faces_padded.flatten()
-        
-        # --- Create PyVista Object ---
-        mesh = pv.PolyData(verts, faces_flat)
-        
-        print(f"Mesh created: {mesh.n_points} vertices, {mesh.n_cells} faces.")
-
-        # --- Plotting ---
-        plotter = pv.Plotter()
-        
-        # Add the mesh
-        plotter.add_mesh(
-            mesh, 
-            color='orange', 
-            specular=0.5,           # Shininess
-            smooth_shading=True,    # Gourad shading
-            opacity=1.0,
-            show_edges=False        # Set to True to see the wireframe
-        )
-        
-        # Add some context helpers
-        plotter.add_bounding_box()
-        plotter.add_axes()
-        plotter.add_text(self.equation, position='upper_left', font_size=10)
-        
-        print("Opening visualization window...")
-        plotter.show()
+        return vertices, triangles
 
 
-if __name__ == "__main__":
-    
-    # гироид
-    gyroid = ImplicitSurfaceMesh(
-        equation_str="sin(x)*cos(y) + sin(y)*cos(z) + sin(z)*cos(x)",
-        bounds=((-np.pi*2, np.pi*2), (-np.pi*2, np.pi*2), (-np.pi*2, np.pi*2)),
-        resolution=120
-    )
-    gyroid.visualize()
+def create_mesh(
+    equation: str,
+    equation_type: str,
+    space_metadata: SpaceMetadata,
+) -> SurfaceMesh:
+    if equation_type.lower() == 'explicit':
+        return ExplicitSurfaceMesh(equation, space_metadata)
+    elif equation_type.lower() == 'implicit':
+        return ImplicitSurfaceMesh(equation, space_metadata)
+    else:
+        raise ValueError(f"Unknown equation type: {equation_type}")

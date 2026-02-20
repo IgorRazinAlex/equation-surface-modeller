@@ -1,4 +1,3 @@
-import cexprtk
 import numpy as np
 
 from typing import List
@@ -14,28 +13,28 @@ class Equation:
         pass
 
     def solve(self, space_metadata: SpaceMetadata) -> PlotMetadata:
-        x, y = space_metadata.get_grid()
-        z = np.empty((x.shape[0], x.shape[1]), dtype=float)
+        x, y = space_metadata.get_grid_2d()
+        z = np.full(x.shape, np.nan, dtype=float)
         for i in range(x.shape[0]):
             for j in range(x.shape[1]):
                 try:
-                    result = self.solve_point(float(x[i, j]), float(y[i, j]))
-                    z[i, j] = np.array(list(filter(space_metadata.check_z_bounds, result)), dtype=float)
+                    z[i, j] = self.solve_point(float(x[i, j]), float(y[i, j]))
                 except Exception:
-                    z[i, j] = np.array([], dtype=float)
+                    continue
         return PlotMetadata(x, y, z)
 
 
 class ExplicitSurfaceEquation(Equation):
-    '''
-    z = f(x, y)
-    '''
-    def __init__(self, equation: str):
-        super().__init__(equation)
-        self.symbol_table = cexprtk.Symbol_Table({'x': 0.0, 'y': 0.0}, add_constants=True)
-        self.expression_obj = cexprtk.Expression(equation, self.symbol_table)
+    def solve_point(self, x: float, y: float) -> float:
+        env = {k: v for k, v in np.__dict__.items() if callable(v) or isinstance(v, (int, float, np.number))}
+        env.update(
+            {
+                'x': x,
+                'y': y,
+            }
+        )
+        return eval(self.equation, {"__builtins__": {}}, env)
 
-    def solve_point(self, x: float, y: float) -> List[float]:
-        self.symbol_table.variables['x'] = x
-        self.symbol_table.variables['y'] = y
-        return [float(self.expression_obj())]
+
+def sanitize_equation(equation: str) -> str:
+    return equation.replace('^', '**')
