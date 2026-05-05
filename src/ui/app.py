@@ -1,0 +1,359 @@
+import sys
+import numpy as np
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout,
+    QHBoxLayout, QLineEdit, QPushButton, QComboBox,
+    QGroupBox, QFormLayout, QDoubleSpinBox, QSpinBox,
+    QCheckBox, QMessageBox, QLabel, QSizePolicy,
+)
+from PyQt5.QtCore import Qt
+import pyvista as pv
+from pyvistaqt import QtInteractor
+
+from src.view.plot import SpaceMetadata, UniformGridMetadata
+from src.view.mesh import create_mesh
+from src.view.plot_view import MeshVisualizer
+
+
+class SurfaceVisualizerWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("3D Surface Visualizer")
+        self.setGeometry(100, 100, 1400, 850)
+
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+
+        main_layout = QHBoxLayout(central_widget)
+
+        control_panel = self._create_control_panel()
+        main_layout.addWidget(control_panel, 1)
+
+        viz_widget = self._create_visualization_widget()
+        main_layout.addWidget(viz_widget, 3)
+
+        self.current_vertices      = None
+        self.current_triangles     = None
+        self.current_equation      = ""
+        self.current_space_metadata = None
+
+
+    def _create_control_panel(self) -> QWidget:
+        panel = QWidget()
+        panel.setMaximumWidth(370)
+        layout = QVBoxLayout(panel)
+ 
+        layout.addWidget(self._create_equation_group())
+        layout.addWidget(self._create_algorithm_group())   # ← новая группа
+        layout.addWidget(self._create_grid_group())
+        layout.addWidget(self._create_display_group())
+        layout.addWidget(self._create_buttons())
+        layout.addStretch()
+
+        return panel
+
+    def _create_equation_group(self) -> QGroupBox:
+        group = QGroupBox("Equation")
+        layout = QVBoxLayout()
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Type:"))
+        self.equation_type = QComboBox()
+        self.equation_type.addItems([
+            "Explicit (z = f(x,y))",
+            "Implicit (F(x,y,z) = 0)",
+        ])
+        self.equation_type.currentIndexChanged.connect(
+            self._on_equation_type_changed
+        )
+        row.addWidget(self.equation_type)
+        layout.addLayout(row)
+
+        layout.addWidget(QLabel("Equation:"))
+        self.equation_input = QLineEdit()
+        self.equation_input.setPlaceholderText(
+            "e.g.  sin(x)*cos(y)  or  x**2 + y**2 - z - 1"
+        )
+        layout.addWidget(self.equation_input)
+
+        group.setLayout(layout)
+        return group
+
+    def _create_algorithm_group(self) -> QGroupBox:
+        self.algo_group = QGroupBox("Meshing Algorithm (Implicit only)")
+        layout = QFormLayout()
+
+        self.algorithm_combo = QComboBox()
+        self.algorithm_combo.addItems([
+            "Marching Cubes",
+            "Dual Contouring",
+        ])
+        self.algorithm_combo.setToolTip(
+            "Dual Contouring корректно обрабатывает разрывные функции\n"
+            "(например, z - 1/x = 0), отбрасывая артефакты вблизи разрывов."
+        )
+        layout.addRow("Algorithm:", self.algorithm_combo)
+
+        self.disc_threshold = QDoubleSpinBox()
+        self.disc_threshold.setRange(0.1, 1e6)
+        self.disc_threshold.setValue(10.0)
+        self.disc_threshold.setDecimals(1)
+        self.disc_threshold.setToolTip(
+            "Ячейки, где |F(x,y,z)| превышает этот порог,\n"
+            "считаются артефактами разрыва и пропускаются.\n"
+            "Уменьшите, если артефакты остаются;\n"
+            "увеличьте, если поверхность имеет «дыры»."
+        )
+        layout.addRow("Discontinuity threshold:", self.disc_threshold)
+
+        self.algo_group.setLayout(layout)
+        return self.algo_group
+
+    def _create_grid_group(self) -> QGroupBox:
+        group = QGroupBox("Grid Parameters")
+        layout = QFormLayout()
+
+        self.x_min = self._make_dspin(-5)
+        self.x_max = self._make_dspin(5)
+        layout.addRow("X range:", self._range_widget(self.x_min, self.x_max))
+
+        self.y_min = self._make_dspin(-5)
+        self.y_max = self._make_dspin(5)
+        layout.addRow("Y range:", self._range_widget(self.y_min, self.y_max))
+
+        self.z_min = self._make_dspin(-5)
+        self.z_max = self._make_dspin(5)
+        self.z_range_row_label = QLabel("Z range:")
+        layout.addRow(self.z_range_row_label,
+                      self._range_widget(self.z_min, self.z_max))
+
+        self.x_points = QSpinBox()
+        self.x_points.setRange(10, 300)
+        self.x_points.setValue(50)
+        layout.addRow("X points:", self.x_points)
+
+        self.y_points = QSpinBox()
+        self.y_points.setRange(10, 300)
+        self.y_points.setValue(50)
+        layout.addRow("Y points:", self.y_points)
+
+        self.z_points = QSpinBox()
+        self.z_points.setRange(10, 300)
+        self.z_points.setValue(50)
+        self.z_points_label = QLabel("Z points:")
+        layout.addRow(self.z_points_label, self.z_points)
+
+        group.setLayout(layout)
+        return group
+
+    def _create_display_group(self) -> QGroupBox:
+        group = QGroupBox("Display Options")
+        layout = QFormLayout()
+
+        self.mesh_color = QComboBox()
+        self.mesh_color.addItems([
+            "orange", "lightblue", "lightgreen",
+            "white", "red", "yellow", "cyan", "magenta",
+        ])
+        layout.addRow("Color:", self.mesh_color)
+
+        self.mesh_opacity = QDoubleSpinBox()
+        self.mesh_opacity.setRange(0.0, 1.0)
+        self.mesh_opacity.setSingleStep(0.1)
+        self.mesh_opacity.setValue(1.0)
+        layout.addRow("Opacity:", self.mesh_opacity)
+
+        self.show_edges    = QCheckBox()
+        self.smooth_shading = QCheckBox()
+        self.smooth_shading.setChecked(True)
+        layout.addRow("Show edges:",     self.show_edges)
+        layout.addRow("Smooth shading:", self.smooth_shading)
+
+        group.setLayout(layout)
+        return group
+
+    def _create_buttons(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        btn_generate = QPushButton("Generate Surface")
+        btn_generate.setStyleSheet(
+            "QPushButton { background-color: #4CAF50; color: white; "
+            "font-weight: bold; padding: 8px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #45a049; }"
+        )
+        btn_generate.clicked.connect(self.generate_surface)
+        layout.addWidget(btn_generate)
+
+        btn_update = QPushButton("Update Display")
+        btn_update.clicked.connect(self.visualize_current_surface)
+        layout.addWidget(btn_update)
+
+        btn_clear = QPushButton("Clear Scene")
+        btn_clear.setStyleSheet(
+            "QPushButton { background-color: #f44336; color: white; "
+            "padding: 6px; border-radius: 4px; }"
+            "QPushButton:hover { background-color: #d32f2f; }"
+        )
+        btn_clear.clicked.connect(self.clear_surface)
+        layout.addWidget(btn_clear)
+
+        return widget
+
+    def _create_visualization_widget(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.plotter = QtInteractor(widget)
+        self.plotter.set_background("black")
+        self.plotter.add_axes()
+        layout.addWidget(self.plotter.interactor)
+
+        return widget
+ 
+    @staticmethod
+    def _make_dspin(value: float) -> QDoubleSpinBox:
+        sb = QDoubleSpinBox()
+        sb.setRange(-1000, 1000)
+        sb.setValue(value)
+        return sb
+
+    @staticmethod
+    def _range_widget(lo: QDoubleSpinBox, hi: QDoubleSpinBox) -> QWidget:
+        w = QWidget()
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(lo)
+        lay.addWidget(QLabel("→"))
+        lay.addWidget(hi)
+        return w
+
+    def _on_equation_type_changed(self, index: int):
+        is_implicit = (index == 1)
+        self.z_min.setVisible(is_implicit)
+        self.z_max.setVisible(is_implicit)
+        self.z_range_row_label.setVisible(is_implicit)
+        self.z_points.setVisible(is_implicit)
+        self.z_points_label.setVisible(is_implicit)
+        self.algo_group.setVisible(is_implicit)
+
+    def _get_equation_type_str(self) -> str:
+        return (
+            "implicit"
+            if self.equation_type.currentIndex() == 1
+            else "explicit"
+        )
+
+    def _get_algorithm_str(self) -> str:
+        text = self.algorithm_combo.currentText()
+        if "Dual" in text:
+            return "dual_contouring"
+        return "marching_cubes"
+
+    def _get_space_metadata(self) -> SpaceMetadata:
+        x_pts = self.x_points.value()
+        y_pts = self.y_points.value()
+        z_pts = self.z_points.value()
+
+        grid = UniformGridMetadata(
+            x_range=(self.x_min.value(), self.x_max.value()),
+            y_range=(self.y_min.value(), self.y_max.value()),
+            x_points=x_pts,
+            y_points=y_pts,
+        )
+        return SpaceMetadata(
+            grid_metadata=grid,
+            x_min=self.x_min.value(), x_max=self.x_max.value(),
+            y_min=self.y_min.value(), y_max=self.y_max.value(),
+            z_min=self.z_min.value(), z_max=self.z_max.value(),
+            z_points=z_pts,
+        )
+
+    def generate_surface(self):
+        equation = self.equation_input.text().strip()
+        if not equation:
+            QMessageBox.warning(self, "Warning", "Please enter an equation.")
+            return
+
+        try:
+            eq_type   = self._get_equation_type_str()
+            algorithm = self._get_algorithm_str()
+            space_md  = self._get_space_metadata()
+
+            mesh_obj = create_mesh(
+                equation=equation,
+                equation_type=eq_type,
+                space_metadata=space_md,
+                algorithm=algorithm,
+                discontinuity_threshold=self.disc_threshold.value(),
+            )
+            vertices, triangles = mesh_obj.generate_mesh()
+
+            self.current_vertices       = vertices
+            self.current_triangles      = triangles
+            self.current_equation       = equation
+            self.current_space_metadata = space_md
+ 
+            self.visualize_current_surface()
+
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Error", f"Failed to generate surface:\n{e}"
+            )
+
+    def visualize_current_surface(self):
+        if self.current_vertices is None or self.current_triangles is None:
+            return
+
+        try:
+            self.plotter.clear()
+
+            viz = MeshVisualizer()
+            mesh = viz.prepare_mesh_data(
+                self.current_vertices, self.current_triangles
+            )
+            mesh = viz.clip(mesh, self.current_space_metadata)
+
+            self.plotter.add_mesh(
+                mesh,
+                color=self.mesh_color.currentText(),
+                opacity=self.mesh_opacity.value(),
+                show_edges=self.show_edges.isChecked(),
+                smooth_shading=self.smooth_shading.isChecked(),
+                specular=0.5,
+            )
+            self.plotter.add_bounding_box()
+            self.plotter.add_axes()
+            self.plotter.add_text(
+                f"Equation: {self.current_equation}",
+                position="upper_left",
+                font_size=10,
+            )
+            self.plotter.render()
+
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Error", f"Failed to visualize surface:\n{e}"
+            )
+
+    def clear_surface(self):
+        self.plotter.clear()
+        self.plotter.add_axes()
+        self.plotter.render()
+
+        self.current_vertices       = None
+        self.current_triangles      = None
+        self.current_equation       = ""
+        self.current_space_metadata = None
+
+
+def main():
+    app = QApplication(sys.argv)
+    window = SurfaceVisualizerWindow()
+    window.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == '__main__':
+    main()
