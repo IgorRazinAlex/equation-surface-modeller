@@ -4,14 +4,14 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QLineEdit, QPushButton, QComboBox,
     QGroupBox, QFormLayout, QDoubleSpinBox, QSpinBox,
-    QCheckBox, QMessageBox, QLabel, QSizePolicy,
+    QCheckBox, QMessageBox, QLabel, QSizePolicy, QFileDialog,
 )
 from PyQt5.QtCore import Qt
 import pyvista as pv
 from pyvistaqt import QtInteractor
 
 from src.view.plot import SpaceMetadata, UniformGridMetadata
-from src.view.mesh import create_mesh
+from src.view.mesh import create_mesh, export_to_obj, export_to_stl
 from src.view.plot_view import MeshVisualizer
 
 
@@ -44,9 +44,10 @@ class SurfaceVisualizerWindow(QMainWindow):
         layout = QVBoxLayout(panel)
  
         layout.addWidget(self._create_equation_group())
-        layout.addWidget(self._create_algorithm_group())   # ← новая группа
+        layout.addWidget(self._create_algorithm_group())
         layout.addWidget(self._create_grid_group())
         layout.addWidget(self._create_display_group())
+        layout.addWidget(self._create_export_group())
         layout.addWidget(self._create_buttons())
         layout.addStretch()
 
@@ -172,6 +173,27 @@ class SurfaceVisualizerWindow(QMainWindow):
         group.setLayout(layout)
         return group
 
+    def _create_export_group(self) -> QGroupBox:
+        """Create export settings group."""
+        group = QGroupBox("Export Settings")
+        layout = QFormLayout()
+
+        self.export_format = QComboBox()
+        self.export_format.addItems([
+            "OBJ (Wavefront)",
+            "STL (Binary)",
+            "STL (ASCII)",
+        ])
+        self.export_format.setToolTip(
+            "OBJ: текстовый формат с поддержкой метаданных\n"
+            "STL Binary: компактный бинарный формат\n"
+            "STL ASCII: читаемый текстовый формат"
+        )
+        layout.addRow("Format:", self.export_format)
+
+        group.setLayout(layout)
+        return group
+
     def _create_buttons(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -197,6 +219,15 @@ class SurfaceVisualizerWindow(QMainWindow):
         )
         btn_clear.clicked.connect(self.clear_surface)
         layout.addWidget(btn_clear)
+
+        btn_export = QPushButton("Export Mesh")
+        btn_export.setStyleSheet(
+            "QPushButton { background-color: #2196F3; color: white; "
+            "padding: 8px; border-radius: 4px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #1976D2; }"
+        )
+        btn_export.clicked.connect(self.export_mesh)
+        layout.addWidget(btn_export)
 
         return widget
 
@@ -346,6 +377,96 @@ class SurfaceVisualizerWindow(QMainWindow):
         self.current_triangles      = None
         self.current_equation       = ""
         self.current_space_metadata = None
+
+    def export_mesh(self):
+        if self.current_vertices is None or self.current_triangles is None:
+            QMessageBox.warning(
+                self, "Warning", 
+                "No mesh to export. Please generate a surface first."
+            )
+            return
+
+        format_text = self.export_format.currentText()
+
+        if "OBJ" in format_text:
+            file_filter = "OBJ Files (*.obj);;All Files (*)"
+            default_ext = ".obj"
+        else:  # STL
+            file_filter = "STL Files (*.stl);;All Files (*)"
+            default_ext = ".stl"
+
+        filename, _ = QFileDialog.getSaveFileName(
+            self,
+            f"Export Mesh to {format_text}",
+            "",
+            file_filter
+        )
+        
+        if not filename:
+            return
+
+        if not filename.lower().endswith(default_ext):
+            filename += default_ext
+
+        try:
+            metadata = None
+            if "OBJ" in format_text:
+                metadata = {
+                    "Equation": self.current_equation,
+                    "Equation Type": self._get_equation_type_str(),
+                    "Algorithm": self._get_algorithm_str(),
+                    "X Range": f"{self.x_min.value()} to {self.x_max.value()}",
+                    "Y Range": f"{self.y_min.value()} to {self.y_max.value()}",
+                    "Z Range": f"{self.z_min.value()} to {self.z_max.value()}",
+                    "X Points": self.x_points.value(),
+                    "Y Points": self.y_points.value(),
+                    "Z Points": self.z_points.value(),
+                    "Vertices": len(self.current_vertices),
+                    "Faces": len(self.current_triangles),
+                }
+
+            if "OBJ" in format_text:
+                export_to_obj(
+                    self.current_vertices,
+                    self.current_triangles,
+                    filename,
+                    metadata
+                )
+                format_name = "OBJ"
+   
+            elif "STL (Binary)" in format_text:
+                export_to_stl(
+                    self.current_vertices,
+                    self.current_triangles,
+                    filename,
+                    ascii_format=False
+                )
+                format_name = "STL (Binary)"
+
+            elif "STL (ASCII)" in format_text:
+                export_to_stl(
+                    self.current_vertices,
+                    self.current_triangles,
+                    filename,
+                    ascii_format=True
+                )
+                format_name = "STL (ASCII)"
+            else:
+                raise ValueError(f"Unknown export format: {format_text}")
+
+            QMessageBox.information(
+                self, "Export Successful",
+                f"Mesh exported successfully to:\n{filename}\n\n"
+                f"Format: {format_name}\n"
+                f"Vertices: {len(self.current_vertices)}\n"
+                f"Faces: {len(self.current_triangles)}"
+            )
+
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Export Error",
+                f"Failed to export mesh:\n{e}"
+            )
 
 
 def main():
