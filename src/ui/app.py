@@ -10,7 +10,7 @@ from PyQt5.QtCore import Qt
 import pyvista as pv
 from pyvistaqt import QtInteractor
 
-from src.view.plot import SpaceMetadata, UniformGridMetadata
+from src.view.plot import SpaceMetadata, UniformGridMetadata, LineMetadata
 from src.view.mesh import create_mesh, export_to_obj, export_to_stl
 from src.view.plot_view import MeshVisualizer
 
@@ -35,7 +35,6 @@ class SurfaceVisualizerWindow(QMainWindow):
         self.current_vertices      = None
         self.current_triangles     = None
         self.current_equation      = ""
-        self.current_space_metadata = None
 
 
     def _create_control_panel(self) -> QWidget:
@@ -63,6 +62,7 @@ class SurfaceVisualizerWindow(QMainWindow):
         self.equation_type.addItems([
             "Explicit (z = f(x,y))",
             "Implicit (F(x,y,z) = 0)",
+            "Parametric (x = x(t), y = y(t), z = z(t))",
         ])
         self.equation_type.currentIndexChanged.connect(
             self._on_equation_type_changed
@@ -262,19 +262,40 @@ class SurfaceVisualizerWindow(QMainWindow):
 
     def _on_equation_type_changed(self, index: int):
         is_implicit = (index == 1)
+        is_parametric = (index == 2)
+        
+        # Show/hide Z range and points for implicit surfaces only
         self.z_min.setVisible(is_implicit)
         self.z_max.setVisible(is_implicit)
         self.z_range_row_label.setVisible(is_implicit)
         self.z_points.setVisible(is_implicit)
         self.z_points_label.setVisible(is_implicit)
+        
+        # Algorithm group only for implicit surfaces
         self.algo_group.setVisible(is_implicit)
+        
+        # Update placeholder text based on equation type
+        if is_parametric:
+            self.equation_input.setPlaceholderText(
+                "e.g.  sin(t), cos(t), t  or  x = t, y = t^2, z = sin(t)"
+            )
+        elif is_implicit:
+            self.equation_input.setPlaceholderText(
+                "e.g.  x**2 + y**2 - z - 1"
+            )
+        else:  # explicit
+            self.equation_input.setPlaceholderText(
+                "e.g.  sin(x)*cos(y)"
+            )
 
     def _get_equation_type_str(self) -> str:
-        return (
-            "implicit"
-            if self.equation_type.currentIndex() == 1
-            else "explicit"
-        )
+        index = self.equation_type.currentIndex()
+        if index == 1:
+            return "implicit"
+        elif index == 2:
+            return "parametric"
+        else:
+            return "explicit"
 
     def _get_algorithm_str(self) -> str:
         text = self.algorithm_combo.currentText()
@@ -282,23 +303,58 @@ class SurfaceVisualizerWindow(QMainWindow):
             return "dual_contouring"
         return "marching_cubes"
 
-    def _get_space_metadata(self) -> SpaceMetadata:
-        x_pts = self.x_points.value()
-        y_pts = self.y_points.value()
-        z_pts = self.z_points.value()
+    def _get_parameters_metadata(self):
+        """Return either SpaceMetadata or LineMetadata based on equation type."""
+        eq_type = self._get_equation_type_str()
+        
+        if eq_type == "parametric":
+            # For parametric curves, use x_min/x_max as t_min/t_max
+            # Use y_min/y_max as radius? No, we'll use defaults for now
+            # Actually we need to add UI controls for radius and segments
+            # For now, use defaults from LineMetadata
+            return LineMetadata(
+                t_min=self.x_min.value(),
+                t_max=self.x_max.value(),
+                t_points=self.x_points.value(),  # Use x_points as t_points
+                radius=0.1,  # Default
+                segments=8,  # Default
+            )
+        else:
+            # For explicit/implicit surfaces
+            x_pts = self.x_points.value()
+            y_pts = self.y_points.value()
+            z_pts = self.z_points.value()
 
+            grid = UniformGridMetadata(
+                x_range=(self.x_min.value(), self.x_max.value()),
+                y_range=(self.y_min.value(), self.y_max.value()),
+                x_points=x_pts,
+                y_points=y_pts,
+            )
+            return SpaceMetadata(
+                grid_metadata=grid,
+                x_min=self.x_min.value(), x_max=self.x_max.value(),
+                y_min=self.y_min.value(), y_max=self.y_max.value(),
+                z_min=self.z_min.value(), z_max=self.z_max.value(),
+                z_points=z_pts,
+            )
+
+    def _get_clipping_metadata(self) -> SpaceMetadata:
+        """Return SpaceMetadata for clipping based on UI bounds."""
+        # For clipping we always need SpaceMetadata with x,y,z ranges
+        # Use default grid with 2x2 points (not important for clipping)
         grid = UniformGridMetadata(
             x_range=(self.x_min.value(), self.x_max.value()),
             y_range=(self.y_min.value(), self.y_max.value()),
-            x_points=x_pts,
-            y_points=y_pts,
+            x_points=2,
+            y_points=2,
         )
         return SpaceMetadata(
             grid_metadata=grid,
             x_min=self.x_min.value(), x_max=self.x_max.value(),
             y_min=self.y_min.value(), y_max=self.y_max.value(),
             z_min=self.z_min.value(), z_max=self.z_max.value(),
-            z_points=z_pts,
+            z_points=2,  # Not used for clipping
         )
 
     def generate_surface(self):
@@ -310,12 +366,12 @@ class SurfaceVisualizerWindow(QMainWindow):
         try:
             eq_type   = self._get_equation_type_str()
             algorithm = self._get_algorithm_str()
-            space_md  = self._get_space_metadata()
+            parameters_md  = self._get_parameters_metadata()
 
             mesh_obj = create_mesh(
                 equation=equation,
                 equation_type=eq_type,
-                space_metadata=space_md,
+                parameters_metadata=parameters_md,
                 algorithm=algorithm,
                 discontinuity_threshold=self.disc_threshold.value(),
             )
@@ -324,7 +380,6 @@ class SurfaceVisualizerWindow(QMainWindow):
             self.current_vertices       = vertices
             self.current_triangles      = triangles
             self.current_equation       = equation
-            self.current_space_metadata = space_md
  
             self.visualize_current_surface()
 
@@ -344,7 +399,9 @@ class SurfaceVisualizerWindow(QMainWindow):
             mesh = viz.prepare_mesh_data(
                 self.current_vertices, self.current_triangles
             )
-            mesh = viz.clip(mesh, self.current_space_metadata)
+            # Get clipping metadata from current UI values
+            clipping_md = self._get_clipping_metadata()
+            mesh = viz.clip(mesh, clipping_md)
 
             self.plotter.add_mesh(
                 mesh,
@@ -376,7 +433,6 @@ class SurfaceVisualizerWindow(QMainWindow):
         self.current_vertices       = None
         self.current_triangles      = None
         self.current_equation       = ""
-        self.current_space_metadata = None
 
     def export_mesh(self):
         if self.current_vertices is None or self.current_triangles is None:

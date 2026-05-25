@@ -126,6 +126,44 @@ class SpaceMetadata:
         return self._check_bounds(z, self.z_min, self.z_max)
 
 
+class LineMetadata:
+    DEFAULT_PARAMETERS = {
+        't_min': 0,
+        't_max': 10,
+        't_points': 100,
+        'radius': 0.1,
+        'segments': 8,
+    }
+
+    def __init__(
+        self,
+        t_min: float = DEFAULT_PARAMETERS['t_min'],
+        t_max: float = DEFAULT_PARAMETERS['t_max'],
+        t_points: int = DEFAULT_PARAMETERS['t_points'],
+        radius: float = DEFAULT_PARAMETERS['radius'],
+        segments: int = DEFAULT_PARAMETERS['segments'],
+    ):
+        self.t_min = t_min
+        self.t_max = t_max
+        self.t_points = t_points
+        self.radius = radius
+        self.segments = segments
+        
+    def get_t_axis(self) -> np.ndarray:
+        return np.linspace(self.t_min, self.t_max, self.t_points)
+    
+    def get_resolution_t(self) -> int:
+        return self.t_points
+    
+    def get_bounds(self) -> Tuple[float, float, float, float, float, float]:
+        # For parametric curves, we don't know exact bounds until we evaluate
+        # Return default bounds that can be used for clipping
+        return (-10, 10, -10, 10, -10, 10)
+    
+    def check_t_bounds(self, t: float) -> bool:
+        return self.t_min <= t <= self.t_max
+
+
 class PlotMetadata:
     def __init__(self, x: np.ndarray, y: np.ndarray, z: np.ndarray):
         self.x = x

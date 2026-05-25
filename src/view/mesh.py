@@ -4,15 +4,15 @@ from abc import ABC, abstractmethod
 from typing import Tuple
 import struct
 
-from src.view.plot import SpaceMetadata
+from src.view.plot import SpaceMetadata, LineMetadata
 from src.calc.equations import ExplicitSurfaceEquation, sanitize_equation
 from src.calc.dual_contouring import DualContouringMesh
 
 
 class SurfaceMesh(ABC):
-    def __init__(self, equation: str, space_metadata: SpaceMetadata):
+    def __init__(self, equation: str, parameters_metadata):
         self.equation = sanitize_equation(equation)
-        self.space_metadata = space_metadata
+        self.parameters_metadata = parameters_metadata
  
     @abstractmethod
     def generate_mesh(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -21,13 +21,13 @@ class SurfaceMesh(ABC):
     def get_equation(self) -> str:
         return self.equation
  
-    def get_space_metadata(self) -> SpaceMetadata:
-        return self.space_metadata
+    def get_parameters_metadata(self):
+        return self.parameters_metadata
 
 
 class ExplicitSurfaceMesh(SurfaceMesh):
-    def __init__(self, equation: str, space_metadata: SpaceMetadata):
-        super().__init__(equation, space_metadata)
+    def __init__(self, equation: str, parameters_metadata):
+        super().__init__(equation, parameters_metadata)
         self.equation_solver = ExplicitSurfaceEquation(equation)
 
     def _create_triangles(self, nx: int, ny: int) -> np.ndarray:
@@ -74,13 +74,13 @@ class ExplicitSurfaceMesh(SurfaceMesh):
         return valid_vertices, np.array(valid_triangles, dtype=np.int32)
 
     def generate_mesh(self) -> Tuple[np.ndarray, np.ndarray]:
-        plot_metadata = self.equation_solver.solve(self.space_metadata)
+        plot_metadata = self.equation_solver.solve(self.parameters_metadata)
 
         if np.all(np.isnan(plot_metadata.z)):
             raise ValueError("No valid points generated for the surface")
 
         nx, ny = plot_metadata.z.shape
-        x_axis, y_axis = self.space_metadata.get_axes()
+        x_axis, y_axis = self.parameters_metadata.get_axes()
         valid_mask = ~np.isnan(plot_metadata.z)
 
         if not np.any(valid_mask):
@@ -125,7 +125,7 @@ class ImplicitSurfaceMesh(SurfaceMesh):
         return func
 
     def _evaluate_volume(self) -> np.ndarray:
-        X, Y, Z = self.space_metadata.get_grid_3d()
+        X, Y, Z = self.parameters_metadata.get_grid_3d()
         func = self._build_func()
 
         try:
@@ -146,7 +146,7 @@ class ImplicitSurfaceMesh(SurfaceMesh):
             )
 
     def generate_mesh(self) -> Tuple[np.ndarray, np.ndarray]:
-        grid_info = self.space_metadata.get_grid_3d_with_info()
+        grid_info = self.parameters_metadata.get_grid_3d_with_info()
         volume = self._evaluate_volume()
 
         try:
@@ -183,10 +183,10 @@ class ImplicitSurfaceDualContouringMesh(SurfaceMesh):
     def __init__(
         self,
         equation: str,
-        space_metadata: SpaceMetadata,
+        parameters_metadata,
         discontinuity_threshold: float = 10.0,
     ):
-        super().__init__(equation, space_metadata)
+        super().__init__(equation, parameters_metadata)
         self.discontinuity_threshold = discontinuity_threshold
 
     def _build_func(self):
@@ -207,8 +207,8 @@ class ImplicitSurfaceDualContouringMesh(SurfaceMesh):
         return func
 
     def generate_mesh(self) -> Tuple[np.ndarray, np.ndarray]:
-        x_axis, y_axis = self.space_metadata.get_axes()
-        z_axis = self.space_metadata.get_z_axis()
+        x_axis, y_axis = self.parameters_metadata.get_axes()
+        z_axis = self.parameters_metadata.get_z_axis()
         func = self._build_func()
 
         dc = DualContouringMesh(
@@ -218,10 +218,187 @@ class ImplicitSurfaceDualContouringMesh(SurfaceMesh):
         return vertices, triangles
 
 
+class ParametricCurveMesh(SurfaceMesh):
+    def __init__(self, equation: str, parameters_metadata):
+        super().__init__(equation, parameters_metadata)
+        # Validate that parameters_metadata is LineMetadata
+        if not isinstance(parameters_metadata, LineMetadata):
+            raise TypeError(
+                f"ParametricCurveMesh requires LineMetadata, got {type(parameters_metadata)}"
+            )
+
+    def _evaluate_curve(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Evaluate parametric equations x(t), y(t), z(t)"""
+        t_axis = self.parameters_metadata.get_t_axis()
+        eq = self.equation
+        
+        # Parse equation - expected format: "x = expr_x, y = expr_y, z = expr_z"
+        # or "expr_x, expr_y, expr_z" where each is a function of t
+        import re
+        # Simple parsing: split by commas and expect three expressions
+        parts = [p.strip() for p in eq.split(',')]
+        if len(parts) != 3:
+            raise ValueError(
+                "Parametric equation must have three components separated by commas: "
+                "x(t), y(t), z(t) or x=..., y=..., z=..."
+            )
+        
+        x_expr = parts[0]
+        y_expr = parts[1]
+        z_expr = parts[2]
+        
+        # Remove 'x=', 'y=', 'z=' if present
+        for i, expr in enumerate([x_expr, y_expr, z_expr]):
+            if '=' in expr:
+                expr = expr.split('=')[1].strip()
+                if i == 0:
+                    x_expr = expr
+                elif i == 1:
+                    y_expr = expr
+                else:
+                    z_expr = expr
+        
+        # Evaluate each expression
+        x_vals = np.zeros_like(t_axis)
+        y_vals = np.zeros_like(t_axis)
+        z_vals = np.zeros_like(t_axis)
+        
+        for i, t in enumerate(t_axis):
+            env = {k: v for k, v in np.__dict__.items()
+                   if callable(v) or isinstance(v, (int, float, np.number))}
+            env.update({'t': t})
+            
+            try:
+                x_vals[i] = eval(x_expr, {"__builtins__": {}}, env)
+                y_vals[i] = eval(y_expr, {"__builtins__": {}}, env)
+                z_vals[i] = eval(z_expr, {"__builtins__": {}}, env)
+            except Exception as e:
+                raise ValueError(
+                    f"Error evaluating parametric equation at t={t}: {e}"
+                )
+        
+        return x_vals, y_vals, z_vals
+
+    def _generate_tube_mesh(
+        self,
+        curve_points: np.ndarray,
+        tangents: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Generate tube mesh around curve points"""
+        radius = self.parameters_metadata.radius
+        segments = self.parameters_metadata.segments
+        
+        n_points = len(curve_points)
+        if n_points < 2:
+            raise ValueError("Curve must have at least 2 points")
+        
+        # Compute normals and binormals
+        normals = np.zeros((n_points, 3))
+        binormals = np.zeros((n_points, 3))
+        
+        # Initial normal (arbitrary perpendicular to first tangent)
+        t0 = tangents[0]
+        if abs(t0[0]) < 0.1 and abs(t0[1]) < 0.1:
+            normals[0] = np.array([1, 0, 0])
+        else:
+            normals[0] = np.array([-t0[1], t0[0], 0])
+            normals[0] /= np.linalg.norm(normals[0])
+        
+        binormals[0] = np.cross(tangents[0], normals[0])
+        binormals[0] /= np.linalg.norm(binormals[0])
+        
+        # Propagate frame along curve
+        for i in range(1, n_points):
+            prev_t = tangents[i-1]
+            curr_t = tangents[i]
+            
+            # Simple parallel transport: project previous normal onto plane perpendicular to current tangent
+            # and renormalize
+            prev_normal = normals[i-1]
+            # Project onto plane perpendicular to curr_t
+            proj = prev_normal - np.dot(prev_normal, curr_t) * curr_t
+            proj_norm = np.linalg.norm(proj)
+            if proj_norm > 1e-6:
+                normals[i] = proj / proj_norm
+            else:
+                # If projection is zero, choose arbitrary perpendicular vector
+                if abs(curr_t[0]) < 0.1 and abs(curr_t[1]) < 0.1:
+                    normals[i] = np.array([1, 0, 0])
+                else:
+                    normals[i] = np.array([-curr_t[1], curr_t[0], 0])
+                    normals[i] /= np.linalg.norm(normals[i])
+            
+            # Re-orthogonalize
+            normals[i] -= np.dot(normals[i], curr_t) * curr_t
+            if np.linalg.norm(normals[i]) > 1e-6:
+                normals[i] /= np.linalg.norm(normals[i])
+            else:
+                # Fallback
+                if abs(curr_t[0]) < 0.1 and abs(curr_t[1]) < 0.1:
+                    normals[i] = np.array([1, 0, 0])
+                else:
+                    normals[i] = np.array([-curr_t[1], curr_t[0], 0])
+                    normals[i] /= np.linalg.norm(normals[i])
+            
+            binormals[i] = np.cross(curr_t, normals[i])
+            binormals[i] /= np.linalg.norm(binormals[i])
+        
+        # Generate vertices
+        vertices = []
+        for i in range(n_points):
+            center = curve_points[i]
+            for j in range(segments):
+                angle = 2 * np.pi * j / segments
+                offset = radius * (np.cos(angle) * normals[i] +
+                                  np.sin(angle) * binormals[i])
+                vertex = center + offset
+                vertices.append(vertex)
+        
+        vertices = np.array(vertices)
+        
+        # Generate triangles
+        triangles = []
+        for i in range(n_points - 1):
+            for j in range(segments):
+                next_j = (j + 1) % segments
+                
+                v0 = i * segments + j
+                v1 = i * segments + next_j
+                v2 = (i + 1) * segments + j
+                v3 = (i + 1) * segments + next_j
+                
+                triangles.append([v0, v1, v2])
+                triangles.append([v1, v3, v2])
+        
+        return vertices, np.array(triangles, dtype=np.int32)
+
+    def generate_mesh(self) -> Tuple[np.ndarray, np.ndarray]:
+        # Evaluate curve
+        x_vals, y_vals, z_vals = self._evaluate_curve()
+        curve_points = np.column_stack([x_vals, y_vals, z_vals])
+        
+        # Compute tangents (finite differences)
+        tangents = np.zeros_like(curve_points)
+        tangents[0] = curve_points[1] - curve_points[0]
+        for i in range(1, len(curve_points) - 1):
+            tangents[i] = curve_points[i+1] - curve_points[i-1]
+        tangents[-1] = curve_points[-1] - curve_points[-2]
+        
+        # Normalize tangents
+        norms = np.linalg.norm(tangents, axis=1)
+        norms[norms == 0] = 1
+        tangents = tangents / norms[:, np.newaxis]
+        
+        # Generate tube mesh
+        vertices, triangles = self._generate_tube_mesh(curve_points, tangents)
+        
+        return vertices, triangles
+
+
 def create_mesh(
     equation: str,
     equation_type: str,
-    space_metadata: SpaceMetadata,
+    parameters_metadata,
     algorithm: str = 'marching_cubes',
     discontinuity_threshold: float = 10.0,
 ) -> SurfaceMesh:
@@ -229,19 +406,22 @@ def create_mesh(
     algo = algorithm.lower()
 
     if eq_type == 'explicit':
-        return ExplicitSurfaceMesh(equation, space_metadata)
+        return ExplicitSurfaceMesh(equation, parameters_metadata)
 
     elif eq_type == 'implicit':
         if algo == 'dual_contouring':
             return ImplicitSurfaceDualContouringMesh(
                 equation,
-                space_metadata,
+                parameters_metadata,
                 discontinuity_threshold=discontinuity_threshold,
             )
         elif algo == 'marching_cubes':
-            return ImplicitSurfaceMesh(equation, space_metadata)
+            return ImplicitSurfaceMesh(equation, parameters_metadata)
         else:
             raise ValueError(f"Unknown algorithm: {algorithm}")
+    elif eq_type == 'parametric':
+        # Parametric curve mesh
+        return ParametricCurveMesh(equation, parameters_metadata)
     else:
         raise ValueError(f"Unknown equation type: {equation_type}")
 
