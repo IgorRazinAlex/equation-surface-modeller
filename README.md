@@ -11,3 +11,5 @@ This project contains full source code of application for creating ready-made 3D
 ```
 git clone https://github.com/IgorRazinAlex/equation-surface-modeller.git
 ```
+
+2. Launch the SurfaceVizualizer.exe application
