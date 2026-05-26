@@ -11,7 +11,7 @@ import pyvista as pv
 from pyvistaqt import QtInteractor
 
 from src.view.plot import SpaceMetadata, UniformGridMetadata, LineMetadata
-from src.view.mesh import create_mesh, export_to_obj, export_to_stl
+from src.view.mesh import create_mesh, export_to_obj, export_to_stl, export_to_fbx
 from src.view.plot_view import MeshVisualizer
 
 
@@ -116,11 +116,13 @@ class SurfaceVisualizerWindow(QMainWindow):
 
         self.x_min = self._make_dspin(-5)
         self.x_max = self._make_dspin(5)
-        layout.addRow("X range:", self._range_widget(self.x_min, self.x_max))
+        self.x_range_label = QLabel("X range:")
+        layout.addRow(self.x_range_label, self._range_widget(self.x_min, self.x_max))
 
         self.y_min = self._make_dspin(-5)
         self.y_max = self._make_dspin(5)
-        layout.addRow("Y range:", self._range_widget(self.y_min, self.y_max))
+        self.y_range_label = QLabel("Y range:")
+        layout.addRow(self.y_range_label, self._range_widget(self.y_min, self.y_max))
 
         self.z_min = self._make_dspin(-5)
         self.z_max = self._make_dspin(5)
@@ -131,12 +133,14 @@ class SurfaceVisualizerWindow(QMainWindow):
         self.x_points = QSpinBox()
         self.x_points.setRange(10, 300)
         self.x_points.setValue(50)
-        layout.addRow("X points:", self.x_points)
+        self.x_points_label = QLabel("X points:")
+        layout.addRow(self.x_points_label, self.x_points)
 
         self.y_points = QSpinBox()
         self.y_points.setRange(10, 300)
         self.y_points.setValue(50)
-        layout.addRow("Y points:", self.y_points)
+        self.y_points_label = QLabel("Y points:")
+        layout.addRow(self.y_points_label, self.y_points)
 
         self.z_points = QSpinBox()
         self.z_points.setRange(10, 300)
@@ -183,11 +187,13 @@ class SurfaceVisualizerWindow(QMainWindow):
             "OBJ (Wavefront)",
             "STL (Binary)",
             "STL (ASCII)",
+            "FBX (Autodesk)",
         ])
         self.export_format.setToolTip(
             "OBJ: текстовый формат с поддержкой метаданных\n"
             "STL Binary: компактный бинарный формат\n"
-            "STL ASCII: читаемый текстовый формат"
+            "STL ASCII: читаемый текстовый формат\n"
+            "FBX: формат 3D-моделей Autodesk"
         )
         layout.addRow("Format:", self.export_format)
 
@@ -256,7 +262,6 @@ class SurfaceVisualizerWindow(QMainWindow):
         lay = QHBoxLayout(w)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addWidget(lo)
-        lay.addWidget(QLabel("→"))
         lay.addWidget(hi)
         return w
 
@@ -273,6 +278,24 @@ class SurfaceVisualizerWindow(QMainWindow):
         
         # Algorithm group only for implicit surfaces
         self.algo_group.setVisible(is_implicit)
+        
+        # Update labels and visibility for parametric curves
+        if is_parametric:
+            self.x_range_label.setText("T range:")
+            self.x_points_label.setText("T points:")
+            self.y_range_label.setVisible(False)
+            self.y_min.setVisible(False)
+            self.y_max.setVisible(False)
+            self.y_points_label.setVisible(False)
+            self.y_points.setVisible(False)
+        else:
+            self.x_range_label.setText("X range:")
+            self.x_points_label.setText("X points:")
+            self.y_range_label.setVisible(True)
+            self.y_min.setVisible(True)
+            self.y_max.setVisible(True)
+            self.y_points_label.setVisible(True)
+            self.y_points.setVisible(True)
         
         # Update placeholder text based on equation type
         if is_parametric:
@@ -447,9 +470,15 @@ class SurfaceVisualizerWindow(QMainWindow):
         if "OBJ" in format_text:
             file_filter = "OBJ Files (*.obj);;All Files (*)"
             default_ext = ".obj"
-        else:  # STL
+        elif "STL" in format_text:
             file_filter = "STL Files (*.stl);;All Files (*)"
             default_ext = ".stl"
+        elif "FBX" in format_text:
+            file_filter = "FBX Files (*.fbx);;All Files (*)"
+            default_ext = ".fbx"
+        else:
+            QMessageBox.critical(self, "Error", f"Unknown format: {format_text}")
+            return
 
         filename, _ = QFileDialog.getSaveFileName(
             self,
@@ -467,19 +496,33 @@ class SurfaceVisualizerWindow(QMainWindow):
         try:
             metadata = None
             if "OBJ" in format_text:
-                metadata = {
-                    "Equation": self.current_equation,
-                    "Equation Type": self._get_equation_type_str(),
-                    "Algorithm": self._get_algorithm_str(),
-                    "X Range": f"{self.x_min.value()} to {self.x_max.value()}",
-                    "Y Range": f"{self.y_min.value()} to {self.y_max.value()}",
-                    "Z Range": f"{self.z_min.value()} to {self.z_max.value()}",
-                    "X Points": self.x_points.value(),
-                    "Y Points": self.y_points.value(),
-                    "Z Points": self.z_points.value(),
-                    "Vertices": len(self.current_vertices),
-                    "Faces": len(self.current_triangles),
-                }
+                eq_type = self._get_equation_type_str()
+                if eq_type == "parametric":
+                    metadata = {
+                        "Equation": self.current_equation,
+                        "Equation Type": eq_type,
+                        "Algorithm": self._get_algorithm_str(),
+                        "T Range": f"{self.x_min.value()} to {self.x_max.value()}",
+                        "T Points": self.x_points.value(),
+                        "Radius": 0.1,  # default hardcoded
+                        "Segments": 8,   # default hardcoded
+                        "Vertices": len(self.current_vertices),
+                        "Faces": len(self.current_triangles),
+                    }
+                else:
+                    metadata = {
+                        "Equation": self.current_equation,
+                        "Equation Type": eq_type,
+                        "Algorithm": self._get_algorithm_str(),
+                        "X Range": f"{self.x_min.value()} to {self.x_max.value()}",
+                        "Y Range": f"{self.y_min.value()} to {self.y_max.value()}",
+                        "Z Range": f"{self.z_min.value()} to {self.z_max.value()}",
+                        "X Points": self.x_points.value(),
+                        "Y Points": self.y_points.value(),
+                        "Z Points": self.z_points.value(),
+                        "Vertices": len(self.current_vertices),
+                        "Faces": len(self.current_triangles),
+                    }
 
             if "OBJ" in format_text:
                 export_to_obj(
@@ -507,6 +550,16 @@ class SurfaceVisualizerWindow(QMainWindow):
                     ascii_format=True
                 )
                 format_name = "STL (ASCII)"
+            
+            elif "FBX" in format_text:
+                export_to_fbx(
+                    self.current_vertices,
+                    self.current_triangles,
+                    filename,
+                    mesh_name="ExportedSurface"
+                )
+                format_name = "FBX"
+
             else:
                 raise ValueError(f"Unknown export format: {format_text}")
 

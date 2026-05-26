@@ -4,6 +4,10 @@ from abc import ABC, abstractmethod
 from typing import Tuple
 import struct
 
+from aspose.threed import Scene
+from aspose.threed.entities import Mesh
+from aspose.threed.utilities import Vector4
+
 from src.view.plot import SpaceMetadata, LineMetadata
 from src.calc.equations import ExplicitSurfaceEquation, sanitize_equation
 from src.calc.dual_contouring import DualContouringMesh
@@ -535,3 +539,32 @@ def _export_to_stl_binary(
             f.write(struct.pack('<fff', v2[0], v2[1], v2[2]))
 
             f.write(struct.pack('<H', 0))
+
+
+def export_to_fbx(
+    vertices: np.ndarray,
+    triangles: np.ndarray,
+    filename: str,
+    mesh_name: str = "SurfaceMesh",
+) -> None:
+    if vertices is None or len(vertices) == 0:
+        raise ValueError("Нет вершин для экспорта.")
+    if triangles is None or len(triangles) == 0:
+        raise ValueError("Нет треугольников для экспорта.")
+
+    mesh = Mesh()
+
+    for v in vertices:
+        mesh.control_points.append(Vector4(v[0], v[1], v[2], 1.0))
+
+    for tri in triangles:
+        mesh.create_polygon(int(tri[0]), int(tri[1]), int(tri[2]))
+
+    scene = Scene()
+    node = scene.root_node.create_child_node(mesh_name)
+    node.entity = mesh
+
+    if not filename.lower().endswith('.fbx'):
+        filename += '.fbx'
+    scene.save(filename)
+    print(f"Меш успешно экспортирован в {filename}")
