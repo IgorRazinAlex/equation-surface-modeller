@@ -7,9 +7,4 @@ This project contains full source code of application for creating ready-made 3D
 
 ## Installation
 
-1. Clone the repository
-```
-git clone https://github.com/IgorRazinAlex/equation-surface-modeller.git
-```
-
-2. Launch the SurfaceVizualizer.exe application
+1. Install from link: https://disk.yandex.ru/d/3UWaqGOBzP9utg
